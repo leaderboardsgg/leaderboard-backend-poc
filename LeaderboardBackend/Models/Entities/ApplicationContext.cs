@@ -7,14 +7,6 @@ namespace LeaderboardBackend.Models.Entities;
 public class ApplicationContext : DbContext
 {
     public const string CASE_INSENSITIVE_COLLATION = "case_insensitive";
-
-    [Obsolete]
-    static ApplicationContext()
-    {
-        // GlobalTypeMapper is obsolete but the new way (DataSource) is a pain to work with
-        NpgsqlConnection.GlobalTypeMapper.MapEnum<UserRole>();
-    }
-
     public ApplicationContext(DbContextOptions<ApplicationContext> options)
         : base(options) { }
 
@@ -25,17 +17,41 @@ public class ApplicationContext : DbContext
     public DbSet<Run> Runs { get; set; } = null!;
     public DbSet<User> Users { get; set; } = null!;
 
-    /// <summary>
-    /// Migrates the database and reloads Npgsql types
-    /// </summary>
     public void MigrateDatabase()
     {
         Database.Migrate();
+        NpgsqlConnection connection = (NpgsqlConnection)Database.GetDbConnection();
+        connection.Open();
+
+        try
+        {
+            connection.ReloadTypes();
+        }
+        finally
+        {
+            connection.Close();
+        }
+    }
+
+    /// <summary>
+    /// Migrates the database and reloads Npgsql types
+    /// </summary>
+    public async Task MigrateDatabaseAsync()
+    {
+        await Database.MigrateAsync();
 
         // when new extensions have been enabled by migrations, Npgsql's type cache must be refreshed
-        Database.OpenConnection();
-        ((NpgsqlConnection)Database.GetDbConnection()).ReloadTypes();
-        Database.CloseConnection();
+        NpgsqlConnection connection = (NpgsqlConnection)Database.GetDbConnection();
+        await connection.OpenAsync();
+
+        try
+        {
+            await connection.ReloadTypesAsync();
+        }
+        finally
+        {
+            await connection.CloseAsync();
+        }
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

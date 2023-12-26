@@ -60,41 +60,31 @@ builder.Services
     .ValidateDataAnnotationsRecursively()
     .ValidateOnStart();
 
-builder.Services.AddDbContext<ApplicationContext>(
-    (services, opt) =>
-    {
-        ApplicationContextConfig appConfig = services
-            .GetRequiredService<IOptions<ApplicationContextConfig>>()
-            .Value;
-        if (appConfig.Pg is not null)
-        {
-            PostgresConfig db = appConfig.Pg;
-            NpgsqlConnectionStringBuilder connectionBuilder =
-                new()
-                {
-                    Host = db.Host,
-                    Username = db.User,
-                    Password = db.Password,
-                    Database = db.Db,
-                    IncludeErrorDetail = true,
-                };
+PostgresConfig db = builder.Configuration.GetSection(ApplicationContextConfig.KEY).Get<ApplicationContextConfig>()!.Pg!;
 
-            if (db.Port is not null)
-            {
-                connectionBuilder.Port = db.Port.Value;
-            }
+NpgsqlConnectionStringBuilder connectionBuilder = new()
+{
+    Host = db.Host,
+    Username = db.User,
+    Password = db.Password,
+    Database = db.Db,
+    IncludeErrorDetail = true,
+};
 
-            opt.UseNpgsql(connectionBuilder.ConnectionString, o => o.UseNodaTime());
-            opt.UseSnakeCaseNamingConvention();
-        }
-        else
-        {
-            throw new UnreachableException(
-                "The database configuration is invalid but it was not caught by validation!"
-            );
-        }
-    }
-);
+if (db.Port is not null)
+{
+    connectionBuilder.Port = db.Port.Value;
+}
+
+NpgsqlDataSourceBuilder dataSourceBuilder = new(connectionBuilder.ConnectionString);
+dataSourceBuilder.UseNodaTime().MapEnum<UserRole>();
+NpgsqlDataSource dataSource = dataSourceBuilder.Build();
+
+builder.Services.AddDbContext<ApplicationContext>(opt =>
+{
+    opt.UseNpgsql(dataSource, o => o.UseNodaTime());
+    opt.UseSnakeCaseNamingConvention();
+});
 
 // Add services to the container.
 builder.Services.AddScoped<IUserService, UserService>();
@@ -311,7 +301,7 @@ using (ApplicationContext context = scope.ServiceProvider.GetRequiredService<App
     if (config.MigrateDb && app.Environment.IsDevelopment())
     {
         // migration as part of the startup phase (dev env only)
-        context.MigrateDatabase();
+        await context.MigrateDatabaseAsync();
     }
 }
 

@@ -1,5 +1,6 @@
 using System;
 using System.Net.Http;
+using System.Threading.Tasks;
 using LeaderboardBackend.Models.Entities;
 using LeaderboardBackend.Test.Lib;
 using MailKit.Net.Smtp;
@@ -9,40 +10,38 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
 using Moq;
+using Npgsql;
+using Respawn;
+using Respawn.Graph;
 using BCryptNet = BCrypt.Net.BCrypt;
 
 namespace LeaderboardBackend.Test.TestApi;
 
 public class TestApiFactory : WebApplicationFactory<Program>
 {
+    private static bool _migrated = false;
+    private static bool _seeded = false;
+    private readonly Mock<ISmtpClient> _mock = new();
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         // Set the environment for the run to Staging
         builder.UseEnvironment(Environments.Staging);
 
-        base.ConfigureWebHost(builder);
+        if (PostgresDatabaseFixture.PostgresContainer is null)
+        {
+            throw new InvalidOperationException("Postgres container is not initialized.");
+        }
+
+        Environment.SetEnvironmentVariable("ApplicationContext__PG__DB", PostgresDatabaseFixture.Database);
+        Environment.SetEnvironmentVariable("ApplicationContext__PG__PORT", PostgresDatabaseFixture.Port.ToString());
+        Environment.SetEnvironmentVariable("ApplicationContext__PG__HOST", PostgresDatabaseFixture.PostgresContainer!.Hostname);
+        Environment.SetEnvironmentVariable("ApplicationContext__PG__USER", PostgresDatabaseFixture.Username);
+        Environment.SetEnvironmentVariable("ApplicationContext__PG__PASSWORD", PostgresDatabaseFixture.Password);
 
         builder.ConfigureServices(services =>
         {
-            if (PostgresDatabaseFixture.PostgresContainer is null)
-            {
-                throw new InvalidOperationException("Postgres container is not initialized.");
-            }
-
-            services.Configure<ApplicationContextConfig>(conf =>
-            {
-                conf.Pg = new PostgresConfig
-                {
-                    Db = PostgresDatabaseFixture.Database!,
-                    Port = (ushort)PostgresDatabaseFixture.Port,
-                    Host = PostgresDatabaseFixture.PostgresContainer.Hostname,
-                    User = PostgresDatabaseFixture.Username!,
-                    Password = PostgresDatabaseFixture.Password!
-                };
-            });
-
             // mock SMTP client
-            services.Replace(ServiceDescriptor.Transient<ISmtpClient>(_ => new Mock<ISmtpClient>().Object));
+            services.Replace(ServiceDescriptor.Transient(_ => _mock.Object));
 
             using IServiceScope scope = services.BuildServiceProvider().CreateScope();
             ApplicationContext dbContext =
@@ -64,42 +63,65 @@ public class TestApiFactory : WebApplicationFactory<Program>
         InitializeDatabase(dbContext);
     }
 
-    private static void InitializeDatabase(ApplicationContext dbContext)
+    private void InitializeDatabase(ApplicationContext dbContext)
     {
-        if (!PostgresDatabaseFixture.HasCreatedTemplate)
+        if (!_migrated)
         {
             dbContext.MigrateDatabase();
-            Seed(dbContext);
-            PostgresDatabaseFixture.CreateTemplateFromCurrentDb();
+            _migrated = true;
         }
+
+        Seed(dbContext);
     }
-
-    private static void Seed(ApplicationContext dbContext)
+    private void Seed(ApplicationContext dbContext)
     {
-        Leaderboard leaderboard =
-            new() { Name = "Mario Goes to Jail", Slug = "mario-goes-to-jail" };
+        if (!_seeded)
+        {
+            Leaderboard leaderboard =
+                new() { Name = "Mario Goes to Jail", Slug = "mario-goes-to-jail" };
 
-        User admin =
-            new()
-            {
-                Id = TestInitCommonFields.Admin.Id,
-                Username = TestInitCommonFields.Admin.Username,
-                Email = TestInitCommonFields.Admin.Email,
-                Password = BCryptNet.EnhancedHashPassword(TestInitCommonFields.Admin.Password),
-                Role = UserRole.Administrator,
-            };
+            User admin =
+                new()
+                {
+                    Id = TestInitCommonFields.Admin.Id,
+                    Username = TestInitCommonFields.Admin.Username,
+                    Email = TestInitCommonFields.Admin.Email,
+                    Password = BCryptNet.EnhancedHashPassword(TestInitCommonFields.Admin.Password),
+                    Role = UserRole.Administrator,
+                };
 
-        dbContext.Add(admin);
-        dbContext.Add(leaderboard);
+            dbContext.Add(admin);
+            dbContext.Add(leaderboard);
 
-        dbContext.SaveChanges();
+            dbContext.SaveChanges();
+            _seeded = true;
+        }
     }
 
     /// <summary>
     /// Deletes and recreates the database
     /// </summary>
-    public void ResetDatabase()
+    public async Task ResetDatabase()
     {
-        PostgresDatabaseFixture.ResetDatabaseToTemplate();
+        using NpgsqlConnection conn = new(PostgresDatabaseFixture.PostgresContainer!.GetConnectionString());
+        await conn.OpenAsync();
+
+        Respawner respawner = await Respawner.CreateAsync(conn, new RespawnerOptions
+        {
+            TablesToInclude = new Table[]
+            {
+                "users",
+                "categories",
+                "leaderboards",
+                "account_confirmations",
+                "account_recoveries",
+                "runs"
+            },
+            DbAdapter = DbAdapter.Postgres
+        });
+
+        await respawner.ResetAsync(conn);
+        _seeded = false;
+        InitializeDatabase();
     }
 }
